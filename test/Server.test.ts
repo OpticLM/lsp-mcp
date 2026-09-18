@@ -137,7 +137,7 @@ describe("MCP server", () => {
       const { resourceTemplates } = yield* mcp["resources/templates/list"]({});
       assert.deepStrictEqual(
         resourceTemplates.map((t) => t.uriTemplate),
-        ["lsp://diagnostics/{param0}"],
+        ["lsp://diagnostics/{file}"],
       );
     }).pipe(Effect.scoped),
   );

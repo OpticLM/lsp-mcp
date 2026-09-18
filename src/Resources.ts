@@ -4,7 +4,7 @@
  * forwarded as MCP log notifications.
  */
 import { Effect, Layer, Schema, Stream } from "effect";
-import { McpServer } from "effect/unstable/ai";
+import { McpSchema, McpServer } from "effect/unstable/ai";
 import { Diagnostics } from "./lsp/Diagnostics.ts";
 import { Documents } from "./lsp/Documents.ts";
 import * as Editor from "./lsp/Editor.ts";
@@ -46,23 +46,25 @@ export const layer = Layer.effectDiscard(
       content: Effect.map(Editor.diagnostics({}), json),
     });
 
-    yield* McpServer.registerResource`lsp://diagnostics/${Schema.String}`({
-      name: "File diagnostics",
-      description:
-        "Diagnostics of one file (path URL-encoded, relative to the workspace root)",
-      mimeType: "application/json",
-      completion: {
-        param0: (input) =>
-          Effect.map(docs.opened, (uris) =>
-            uris.map(docs.file).filter((file) => file.startsWith(input)),
+    yield* McpServer.registerResource`lsp://diagnostics/${McpSchema.param("file", Schema.String)}`(
+      {
+        name: "File diagnostics",
+        description:
+          "Diagnostics of one file (path URL-encoded, relative to the workspace root)",
+        mimeType: "application/json",
+        completion: {
+          file: (input) =>
+            Effect.map(docs.opened, (uris) =>
+              uris.map(docs.file).filter((file) => file.startsWith(input)),
+            ),
+        },
+        content: (_, file) =>
+          Effect.map(
+            Editor.diagnostics({ file: decodeURIComponent(file) }),
+            json,
           ),
       },
-      content: (_, file) =>
-        Effect.map(
-          Editor.diagnostics({ file: decodeURIComponent(file) }),
-          json,
-        ),
-    });
+    );
 
     const updated = (uri: string) =>
       mcp.notifications["notifications/resources/updated"]({ uri });

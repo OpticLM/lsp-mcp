@@ -125,7 +125,7 @@ const locate = Effect.fn("Editor.locate")(function* (where: Model.Where) {
     where.column !== undefined
       ? where.column - 1
       : where.symbol !== undefined
-        ? yield* Effect.orElseSucceed(findSymbol(text, where.symbol), () => -1)
+        ? findSymbol(text, where.symbol)
         : Math.max(0, text.search(/\S/));
   if (character < 0) {
     return yield* new LspError({
@@ -140,13 +140,13 @@ const locate = Effect.fn("Editor.locate")(function* (where: Model.Where) {
   return { doc, position, textDocument: { uri: doc.uri } };
 });
 
+/** Index of `symbol` as a whole word on the line, else its first occurrence, else -1. */
 const findSymbol = (text: string, symbol: string) => {
   const escaped = symbol.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const index = text.search(
     new RegExp(`(?<![\\p{L}\\p{N}_$])${escaped}(?![\\p{L}\\p{N}_$])`, "u"),
   );
-  const found = index >= 0 ? index : text.indexOf(symbol);
-  return found >= 0 ? Effect.succeed(found) : Effect.fail(found);
+  return index >= 0 ? index : text.indexOf(symbol);
 };
 
 const locations = Effect.fn("Editor.locations")(function* (

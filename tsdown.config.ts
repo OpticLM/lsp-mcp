@@ -5,6 +5,10 @@ export default defineConfig({
   format: "esm",
   outDir: "dist",
 
+  deps: {
+    alwaysBundle: ["*"],
+  },
+
   treeshake: true,
   minify: true,
   sourcemap: false,

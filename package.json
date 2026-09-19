@@ -1,6 +1,6 @@
 {
   "name": "@opticlm/lsp-mcp",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "MCP server exposing a Language Server's capabilities to agents as a headless editor",
   "type": "module",
   "license": "MIT",
@@ -27,21 +27,19 @@
     }
   },
   "packageManager": "pnpm@12.4.2",
-  "dependencies": {
-    "@effect/platform-node": "4.0.0-rc.115",
-    "effect": "4.0.0-rc.115",
-    "vscode-languageserver-protocol": "^3.18.3",
-    "vscode-languageserver-textdocument": "^1.0.14",
-    "vscode-uri": "^3.2.0"
-  },
   "devDependencies": {
     "@biomejs/biome": "2.5.14",
+    "@effect/platform-node": "4.0.0-rc.115",
     "@effect/tsgo": "0.45.0",
     "@effect/vitest": "4.0.0-rc.115",
     "@types/node": "^26.6.1",
+    "effect": "4.0.0-rc.115",
     "tsdown": "0.23.0",
     "typescript": "^7.0.2",
     "vitest": "^5.0.1",
-    "vscode-languageserver": "^10.1.1"
+    "vscode-languageserver": "^10.1.1",
+    "vscode-languageserver-protocol": "^3.18.3",
+    "vscode-languageserver-textdocument": "^1.0.14",
+    "vscode-uri": "^3.2.0"
   }
 }

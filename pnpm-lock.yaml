@@ -165,26 +165,13 @@ settings:
 importers:
 
   .:
-    dependencies:
-      '@effect/platform-node':
-        specifier: 4.0.0-rc.115
-        version: 4.0.0-rc.115(effect@4.0.0-rc.115)(redis@6.2.1)
-      effect:
-        specifier: 4.0.0-rc.115
-        version: 4.0.0-rc.115
-      vscode-languageserver-protocol:
-        specifier: ^3.18.3
-        version: 3.18.3
-      vscode-languageserver-textdocument:
-        specifier: ^1.0.14
-        version: 1.0.14
-      vscode-uri:
-        specifier: ^3.2.0
-        version: 3.2.0
     devDependencies:
       '@biomejs/biome':
         specifier: 2.5.14
         version: 2.5.14
+      '@effect/platform-node':
+        specifier: 4.0.0-rc.115
+        version: 4.0.0-rc.115(effect@4.0.0-rc.115)(redis@6.2.1)
       '@effect/tsgo':
         specifier: 0.45.0
         version: 0.45.0
@@ -194,6 +181,9 @@ importers:
       '@types/node':
         specifier: ^26.6.1
         version: 26.6.1
+      effect:
+        specifier: 4.0.0-rc.115
+        version: 4.0.0-rc.115
       tsdown:
         specifier: 0.23.0
         version: 0.23.0(typescript@7.0.2)
@@ -206,6 +196,15 @@ importers:
       vscode-languageserver:
         specifier: ^10.1.1
         version: 10.1.1
+      vscode-languageserver-protocol:
+        specifier: ^3.18.3
+        version: 3.18.3
+      vscode-languageserver-textdocument:
+        specifier: ^1.0.14
+        version: 1.0.14
+      vscode-uri:
+        specifier: ^3.2.0
+        version: 3.2.0
 
 packages:
 

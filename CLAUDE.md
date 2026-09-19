@@ -35,6 +35,9 @@ test/fixtures/workspace.ts temp workspace layer running the fixture server
 
 Rule: outside `src/lsp/`, `vscode-*` may only be imported as types.
 
+`EFFECT.md` lists the Effect 4 API shapes already verified against `repos/effect` (renames from Effect 3, Schedule,
+CLI, MCP, vitest). Read it before grepping the Effect source, and add to it when you verify something new.
+
 ## Design decisions worth knowing
 
 - Positions handed to agents are 1-based; `Where` accepts `column` or a `symbol` name to find on the line.

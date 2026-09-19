@@ -25,6 +25,7 @@ import {
 import {
   CancellationTokenSource,
   type ClientCapabilities,
+  type CompletionItemKind,
   ConfigurationRequest,
   createMessageConnection,
   DidChangeConfigurationNotification,
@@ -46,6 +47,7 @@ import {
   ShutdownRequest,
   StreamMessageReader,
   StreamMessageWriter,
+  type SymbolKind,
   UnregistrationRequest,
   WorkDoneProgressCreateRequest,
   WorkspaceFoldersRequest,
@@ -87,8 +89,8 @@ export class LanguageServer extends Context.Service<
     readonly root: string;
     readonly capabilities: ServerCapabilities;
     readonly serverInfo:
-      | { readonly name: string; readonly version?: string | undefined }
-      | undefined;
+    | { readonly name: string; readonly version?: string | undefined }
+    | undefined;
     readonly request: <P, R>(
       type: RequestType<P, R, unknown>,
       params: P,
@@ -198,9 +200,9 @@ const make = Effect.fn("LanguageServer.make")(function* (options: Options) {
     error instanceof ResponseError
       ? new LspError({ method, message: error.message, code: error.code })
       : new LspError({
-          method,
-          message: error instanceof Error ? error.message : String(error),
-        });
+        method,
+        message: error instanceof Error ? error.message : String(error),
+      });
 
   const send = <P, R>(type: RequestType<P, R, unknown>, params: P) =>
     Effect.callback<R, LspError>((resume) => {
@@ -261,9 +263,9 @@ const make = Effect.fn("LanguageServer.make")(function* (options: Options) {
                   error instanceof ResponseError
                     ? error
                     : new ResponseError(
-                        ErrorCodes.InternalError,
-                        error instanceof Error ? error.message : String(error),
-                      ),
+                      ErrorCodes.InternalError,
+                      error instanceof Error ? error.message : String(error),
+                    ),
                 ),
               ),
             ) as Promise<never>,
@@ -338,11 +340,11 @@ const section = (settings: unknown, path: string | undefined): LSPAny =>
   (path === undefined
     ? settings
     : path
-        .split(".")
-        .reduce<unknown>(
-          (value, key) => (value as Record<string, unknown> | null)?.[key],
-          settings,
-        )) as LSPAny;
+      .split(".")
+      .reduce<unknown>(
+        (value, key) => (value as Record<string, unknown> | null)?.[key],
+        settings,
+      )) as LSPAny;
 
 /**
  * What we tell the server we can do. Deliberately narrow: no dynamic
@@ -393,7 +395,7 @@ const clientCapabilities: ClientCapabilities = {
         deprecatedSupport: true,
       },
       completionItemKind: {
-        valueSet: Array.from({ length: 25 }, (_, i) => (i + 1) as never),
+        valueSet: Array.from({ length: 25 }, (_, i) => (i + 1) as CompletionItemKind),
       },
       contextSupport: true,
     },
@@ -440,5 +442,5 @@ const clientCapabilities: ClientCapabilities = {
 };
 
 function allSymbolKinds() {
-  return Array.from({ length: 26 }, (_, i) => (i + 1) as never);
+  return Array.from({ length: 26 }, (_, i) => (i + 1) as SymbolKind);
 }

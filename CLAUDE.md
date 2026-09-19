@@ -2,15 +2,17 @@
 
 An MCP server that exposes one Language Server to agents as a headless editor.
 Effect 4 (`effect/unstable/ai` for MCP, `effect/unstable/cli` for the CLI) plus
-`vscode-languageserver-protocol` for LSP. TypeScript runs directly on Node 26
-(type stripping); there is no build step.
+`vscode-languageserver-protocol` for LSP. TypeScript is bundled for Node 26 with
+tsdown; source files can still run directly through Node's type stripping.
 
 ## Commands
 
 - `pnpm tsc` — type-check (tsgo with the Effect language-service plugin)
+- `pnpm build` — bundle the CLI to `dist/main.mjs` with tsdown
+- `pnpm dev` — run the TypeScript source directly
 - `pnpm test` — vitest; integration tests spawn `test/fixtures/server.ts`, a real LSP server
 - `pnpm biome check --write --unsafe` — lint/format (run before committing; its rewrites are safe)
-- `node src/main.ts --help` — the CLI; smoke-test with `node src/main.ts --root <dir> -- <server> [args]`
+- `node dist/main.mjs --help` — the built CLI; smoke-test with `node dist/main.mjs --root <dir> -- <server> [args]`
 - Commit with `jj commit -m "..."`, never `git`
 
 The shell may have an HTTP proxy configured; when curling the `--http` transport locally, pass `--noproxy '*'`.

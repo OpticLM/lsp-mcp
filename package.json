@@ -1,14 +1,19 @@
 {
-  "name": "lsp-mcp",
+  "name": "@opticlm/lsp-mcp",
   "version": "0.1.0",
   "description": "MCP server exposing a Language Server's capabilities to agents as a headless editor",
   "type": "module",
   "license": "MIT",
+  "files": [
+    "dist"
+  ],
   "bin": {
-    "lsp-mcp": "./src/main.ts"
+    "lsp-mcp": "./dist/main.mjs"
   },
   "scripts": {
-    "start": "node src/main.ts",
+    "build": "tsdown",
+    "start": "node dist/main.mjs",
+    "dev": "node src/main.ts",
     "check": "tsc",
     "test": "vitest run",
     "lint": "biome check --write --unsafe",
@@ -34,6 +39,7 @@
     "@effect/tsgo": "0.45.0",
     "@effect/vitest": "4.0.0-rc.115",
     "@types/node": "^26.6.1",
+    "tsdown": "0.23.0",
     "typescript": "^7.0.2",
     "vitest": "^5.0.1",
     "vscode-languageserver": "^10.1.1"

@@ -2,7 +2,7 @@
 
 An [MCP](https://modelcontextprotocol.io/) server that exposes a single [Language Server Protocol](https://microsoft.github.io/language-server-protocol/) server to agents as a headless editor.
 
-`lsp-mcp` starts the language server you provide, keeps its document state in sync with the workspace, and exposes the language server's capabilities through MCP tools and resources. It is written in TypeScript and Effect, and runs directly on Node.js without a build step.
+`lsp-mcp` starts the language server you provide, keeps its document state in sync with the workspace, and exposes the language server's capabilities through MCP tools and resources. It is written in TypeScript and [Effect](https://effect.website).
 
 ## Features
 
@@ -28,16 +28,17 @@ Underlying techniques:
 
 ```sh
 pnpm install
+pnpm build
 ```
 
-The repository runs TypeScript directly. From a checkout, invoke the server with `node src/main.ts`.
+From a checkout, invoke the built server with `node dist/main.mjs`. Use `pnpm dev` to run the TypeScript source directly during development.
 
 ## Usage
 
 The general form is:
 
 ```sh
-node src/main.ts [lsp-mcp options] -- <language-server> [language-server args...]
+node dist/main.mjs [lsp-mcp options] -- <language-server> [language-server args...]
 ```
 
 The `--` separates `lsp-mcp` options from the executable and arguments passed to the language server.
@@ -47,7 +48,7 @@ The `--` separates `lsp-mcp` options from the executable and arguments passed to
 stdio is the default transport and is suitable for MCP clients that launch a local server process:
 
 ```sh
-node src/main.ts --root /path/to/project -- typescript-language-server --stdio
+node dist/main.mjs --root /path/to/project -- typescript-language-server --stdio
 ```
 
 For example, an MCP client configuration can point at the checkout like this:
@@ -58,7 +59,7 @@ For example, an MCP client configuration can point at the checkout like this:
     "typescript": {
       "command": "node",
       "args": [
-        "/path/to/lsp-mcp/src/main.ts",
+        "/path/to/lsp-mcp/dist/main.mjs",
         "--root",
         "/path/to/project",
         "--",
@@ -75,7 +76,7 @@ For example, an MCP client configuration can point at the checkout like this:
 Run the MCP endpoint on a local port with `--http`:
 
 ```sh
-node src/main.ts --http 9010 --root ./crate -- rust-analyzer
+node dist/main.mjs --http 9010 --root ./crate -- rust-analyzer
 ```
 
 The endpoint is available at:
@@ -88,20 +89,20 @@ http://localhost:9010/mcp
 
 ```sh
 # Pass JSON initialization options to the language server.
-node src/main.ts \
+node dist/main.mjs \
   --init-options '{"typescript":{"useInferredProjectPerProjectRoot":true}}' \
   -- typescript-language-server --stdio
 
 # Serve workspace/configuration and didChangeConfiguration with JSON settings.
-node src/main.ts \
+node dist/main.mjs \
   --settings '{"gopls":{"staticcheck":true}}' \
   -- gopls
 
 # Add a file-extension to language-id mapping.
-node src/main.ts --language vue=vue --root ./web -- vue-language-server --stdio
+node dist/main.mjs --language vue=vue --root ./web -- vue-language-server --stdio
 
 # Keep more documents open, and always restart a crashed language server.
-node src/main.ts --open-documents 64 --restart always -- clangd
+node dist/main.mjs --open-documents 64 --restart always -- clangd
 ```
 
 ## Development

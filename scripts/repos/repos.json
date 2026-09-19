@@ -5,8 +5,8 @@
     "ref": "effect@4.0.0-rc.115"
   },
   {
-  "url": "https://github.com/microsoft/language-server-protocol",
-  "name": "lsp",
-  "ref": "gh-pages"
+    "url": "https://github.com/microsoft/language-server-protocol",
+    "name": "lsp",
+    "ref": "gh-pages"
   }
 ]

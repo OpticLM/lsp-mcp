@@ -28,7 +28,7 @@ export interface Options {
 
 const info = {
   name: "lsp-mcp",
-  version: "0.1.0",
+  version: "0.1.2",
   protocols: [
     McpProtocol.v2025_11_25,
     McpProtocol.v2025_06_18,

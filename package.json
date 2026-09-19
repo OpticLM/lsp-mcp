@@ -1,6 +1,6 @@
 {
   "name": "@opticlm/lsp-mcp",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "MCP server exposing a Language Server's capabilities to agents as a headless editor",
   "type": "module",
   "license": "MIT",

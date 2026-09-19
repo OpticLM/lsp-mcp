@@ -137,7 +137,7 @@ const command = Command.make(
 );
 
 command.pipe(
-  Command.run({ version: "0.1.0" }),
+  Command.run({ version: "0.1.2" }),
   Effect.tapCause((cause) =>
     Cause.hasInterruptsOnly(cause) ? Effect.void : Effect.logError(cause),
   ),

@@ -329,7 +329,7 @@ const make = Effect.fn("LanguageServer.make")(function* (options: Options) {
     yield* SubscriptionRef.set(progress, HashSet.empty());
     const initialized = yield* send(InitializeRequest.type, {
       processId: process.pid,
-      clientInfo: { name: "lsp-mcp", version: "0.1.0" },
+      clientInfo: { name: "lsp-mcp", version: "0.1.2" },
       locale: "en",
       rootPath: options.root,
       rootUri,

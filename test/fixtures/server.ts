@@ -2,7 +2,8 @@
  * A miniature language server used by the tests. Words are symbols: hover
  * describes the word under the cursor, definition is its first occurrence,
  * references and rename cover every occurrence, and each line containing
- * "TODO" yields a warning. `fixture/state` reports open/close counts.
+ * "TODO" yields a warning. `fixture/state` reports open/close counts and
+ * `fixture/crash` kills the process.
  */
 import {
   createConnection,
@@ -136,6 +137,7 @@ connection.onDocumentSymbol(({ textDocument }) => {
   );
 });
 
+connection.onNotification("fixture/crash", () => process.exit(1));
 connection.onRequest("fixture/state", () => ({
   open: documents.all().length,
   closes,

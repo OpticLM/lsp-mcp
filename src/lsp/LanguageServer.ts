@@ -5,12 +5,20 @@
  * `request` waits for the server to become idle (no `$/progress` work in
  * flight) and retries transient `ContentModified` / `ServerCancelled`
  * failures, so callers can treat the server as if it were always ready.
+ *
+ * The process is supervised: when it exits unexpectedly it is started again
+ * according to the restart policy, the documents that were open are opened in
+ * the new process, and requests caught by the crash wait for it and retry.
+ * Once the policy gives up, every request fails with an `LspError` saying so.
  */
 import { spawn } from "node:child_process";
+import { PassThrough } from "node:stream";
 import { NodeStream } from "@effect/platform-node";
 import {
+  Cause,
   Context,
   Deferred,
+  Duration,
   Effect,
   FiberSet,
   HashSet,
@@ -26,14 +34,22 @@ import {
   CancellationTokenSource,
   type ClientCapabilities,
   type CompletionItemKind,
+  type ConfigurationParams,
   ConfigurationRequest,
   createMessageConnection,
   DidChangeConfigurationNotification,
+  DidChangeTextDocumentNotification,
+  type DidChangeTextDocumentParams,
+  DidCloseTextDocumentNotification,
+  type DidCloseTextDocumentParams,
+  DidOpenTextDocumentNotification,
+  type DidOpenTextDocumentParams,
   ErrorCodes,
   ExitNotification,
   type HandlerResult,
   InitializedNotification,
   InitializeRequest,
+  type InitializeResult,
   LogMessageNotification,
   type LSPAny,
   LSPErrorCodes,
@@ -48,11 +64,19 @@ import {
   StreamMessageReader,
   StreamMessageWriter,
   type SymbolKind,
+  type TextDocumentItem,
   UnregistrationRequest,
   WorkDoneProgressCreateRequest,
   WorkspaceFoldersRequest,
 } from "vscode-languageserver-protocol/node";
 import { URI } from "vscode-uri";
+
+/**
+ * What to do when the server exits unexpectedly: never start it again, always
+ * start it again, or start it again but give up after this many crashes in a
+ * row (less than a minute apart).
+ */
+export type Restart = "never" | "always" | number;
 
 export interface Options {
   readonly command: string;
@@ -62,7 +86,18 @@ export interface Options {
   readonly initializationOptions?: unknown;
   /** Served as `workspace/configuration` and pushed via `didChangeConfiguration`. */
   readonly settings?: unknown;
+  /** Defaults to giving up after 3 crashes in a row. */
+  readonly restart?: Restart;
 }
+
+/** Failures worth retrying: the server was busy, or it went away and may come back. */
+const transient: ReadonlySet<number> = new Set([
+  LSPErrorCodes.ContentModified,
+  LSPErrorCodes.ServerCancelled,
+  ErrorCodes.ConnectionInactive,
+  ErrorCodes.PendingResponseRejected,
+  ErrorCodes.MessageWriteError,
+]);
 
 export class LspError extends Schema.TaggedError<LspError>()("LspError", {
   method: Schema.String,
@@ -70,10 +105,7 @@ export class LspError extends Schema.TaggedError<LspError>()("LspError", {
   code: Schema.optional(Schema.Int),
 }) {
   get retryable() {
-    return (
-      this.code === LSPErrorCodes.ContentModified ||
-      this.code === LSPErrorCodes.ServerCancelled
-    );
+    return this.code !== undefined && transient.has(this.code);
   }
 }
 
@@ -89,8 +121,8 @@ export class LanguageServer extends Context.Service<
     readonly root: string;
     readonly capabilities: ServerCapabilities;
     readonly serverInfo:
-    | { readonly name: string; readonly version?: string | undefined }
-    | undefined;
+      | { readonly name: string; readonly version?: string | undefined }
+      | undefined;
     readonly request: <P, R>(
       type: RequestType<P, R, unknown>,
       params: P,
@@ -105,7 +137,7 @@ export class LanguageServer extends Context.Service<
       type: RequestType<P, R, unknown>,
       handler: (params: P) => Effect.Effect<R, unknown>,
     ) => Effect.Effect<void, never, Scope.Scope>;
-    /** `window/logMessage` and `window/showMessage` traffic. */
+    /** `window/logMessage` and `window/showMessage` traffic, plus restart announcements. */
     readonly logs: Stream.Stream<LogMessage>;
   }
 >()("lsp-mcp/lsp/LanguageServer") {
@@ -113,110 +145,271 @@ export class LanguageServer extends Context.Service<
     Layer.effect(LanguageServer, make(options));
 }
 
+/** One process and its connection; replaced on crash. */
+interface Session {
+  readonly initialized: InitializeResult;
+  readonly exited: Deferred.Deferred<never, LspError>;
+  readonly send: <P, R>(
+    type: RequestType<P, R, unknown>,
+    params: P,
+  ) => Effect.Effect<R, LspError>;
+  readonly notify: <P>(
+    type: NotificationType<P>,
+    params: P,
+  ) => Effect.Effect<void, LspError>;
+}
+
 const make = Effect.fn("LanguageServer.make")(function* (options: Options) {
   const run = yield* FiberSet.makeRuntime<never>();
   const runPromise = yield* FiberSet.makeRuntimePromise<never>();
-  const exited = yield* Deferred.make<never, LspError>();
   const events = yield* PubSub.unbounded<{
     readonly method: string;
     readonly params: unknown;
   }>();
+  const lifecycle = yield* PubSub.unbounded<LogMessage>();
   const progress = yield* SubscriptionRef.make(
     HashSet.empty<string | number>(),
   );
-  const exit = (message: string) =>
-    Deferred.doneUnsafe(
-      exited,
-      Effect.fail(new LspError({ method: "connection", message })),
-    );
+  const initialized = yield* Deferred.make<InitializeResult, LspError>();
+  /** The live session, or the one being started; failed once the policy gives up. */
+  let current = Deferred.makeUnsafe<Session, LspError>();
+  const session = Effect.suspend(() => Deferred.await(current));
+  /** What the server has been told is open, to open it again after a restart. */
+  const documents = new Map<string, TextDocumentItem>();
+  const limit =
+    options.restart === "never"
+      ? 0
+      : options.restart === "always"
+        ? Number.POSITIVE_INFINITY
+        : (options.restart ?? 3);
 
-  const child = yield* Effect.acquireRelease(
-    Effect.sync(() =>
-      spawn(options.command, options.args, {
-        cwd: options.root,
-        stdio: "pipe",
-      }),
-    ),
-    (child) =>
-      Effect.sync(() => void (child.exitCode === null && child.kill())),
-  );
-  child.on("error", (error) =>
-    exit(`failed to start ${options.command}: ${error.message}`),
-  );
-  child.on("exit", (code, signal) =>
-    exit(`${options.command} exited (${signal ?? code})`),
-  );
-  yield* NodeStream.fromReadable<Uint8Array, never>({
-    evaluate: () => child.stderr,
-    onError: () => undefined as never,
-  }).pipe(
-    Stream.decodeText(),
-    Stream.splitLines,
-    Stream.runForEach((line) => Effect.logDebug(line)),
-    Effect.annotateLogs("source", `${options.command}:stderr`),
-    Effect.forkScoped,
-  );
-
-  const connection = createMessageConnection(
-    new StreamMessageReader(child.stdout),
-    new StreamMessageWriter(child.stdin),
-    {
-      error: (m) => run(Effect.logError(m)),
-      warn: (m) => run(Effect.logWarning(m)),
-      info: (m) => run(Effect.logInfo(m)),
-      log: (m) => run(Effect.logDebug(m)),
-    },
-  );
-  yield* Effect.addFinalizer(() => Effect.sync(() => connection.dispose()));
-  connection.onClose(() => exit(`${options.command} closed the connection`));
-  connection.onNotification((method, params) => {
-    PubSub.publishUnsafe(events, { method, params });
-  });
-  connection.onUnhandledProgress(({ token, value }) =>
-    run(
-      SubscriptionRef.update(progress, (active) =>
-        value.kind === "begin"
-          ? HashSet.add(active, token)
-          : value.kind === "end"
-            ? HashSet.remove(active, token)
-            : active,
-      ),
-    ),
-  );
-  connection.onRequest(WorkDoneProgressCreateRequest.type, () => undefined);
-  connection.onRequest(RegistrationRequest.type, () => undefined);
-  connection.onRequest(UnregistrationRequest.type, () => undefined);
-  connection.onRequest(ConfigurationRequest.type, ({ items }) =>
-    items.map((item) => section(options.settings, item.section)),
-  );
   const rootUri = URI.file(options.root).toString();
   const workspaceFolders = [
     { uri: rootUri, name: options.root.split(/[\\/]/).pop() ?? options.root },
   ];
-  connection.onRequest(WorkspaceFoldersRequest.type, () => workspaceFolders);
-  connection.listen();
+  const handlers = new Map<
+    string,
+    (params: unknown) => HandlerResult<unknown, unknown>
+  >([
+    [WorkDoneProgressCreateRequest.method, () => undefined],
+    [RegistrationRequest.method, () => undefined],
+    [UnregistrationRequest.method, () => undefined],
+    [
+      ConfigurationRequest.method,
+      (params) =>
+        (params as ConfigurationParams).items.map((item) =>
+          section(options.settings, item.section),
+        ),
+    ],
+    [WorkspaceFoldersRequest.method, () => workspaceFolders],
+  ]);
 
   const failure = (method: string, error: unknown) =>
     error instanceof ResponseError
       ? new LspError({ method, message: error.message, code: error.code })
       : new LspError({
-        method,
-        message: error instanceof Error ? error.message : String(error),
+          method,
+          message: error instanceof Error ? error.message : String(error),
+        });
+
+  const announce = (level: LogLevel, message: string) =>
+    Effect.andThen(
+      level === "error" ? Effect.logError(message) : Effect.logWarning(message),
+      PubSub.publish(lifecycle, { level, message }),
+    );
+
+  const start = Effect.fn("LanguageServer.start")(function* () {
+    const exited = yield* Deferred.make<never, LspError>();
+    const exit = (message: string) => {
+      if (Deferred.isDoneUnsafe(exited)) return;
+      // Whoever was using this session now waits for the next one; swap before
+      // signalling, as waiters resume synchronously and may give up right away.
+      if (Deferred.isDoneUnsafe(current)) current = Deferred.makeUnsafe();
+      Deferred.doneUnsafe(
+        exited,
+        Effect.fail(
+          new LspError({
+            method: "connection",
+            message,
+            code: ErrorCodes.ConnectionInactive,
+          }),
+        ),
+      );
+    };
+
+    const child = yield* Effect.acquireRelease(
+      Effect.sync(() =>
+        spawn(options.command, options.args, {
+          cwd: options.root,
+          stdio: "pipe",
+        }),
+      ),
+      (child) =>
+        Effect.sync(() => void (child.exitCode === null && child.kill())),
+    );
+    child.on("error", (error) =>
+      exit(`failed to start ${options.command}: ${error.message}`),
+    );
+    child.on("exit", (code, signal) =>
+      exit(`${options.command} exited (${signal ?? code})`),
+    );
+    yield* NodeStream.fromReadable<Uint8Array, never>({
+      evaluate: () => child.stderr,
+      onError: () => undefined as never,
+    }).pipe(
+      Stream.decodeText(),
+      Stream.splitLines,
+      Stream.runForEach((line) => Effect.logDebug(line)),
+      Effect.annotateLogs("source", `${options.command}:stderr`),
+      Effect.forkScoped,
+    );
+
+    // Writes go through a buffer: a broken pipe must end the session, not
+    // surface as a write failure (vscode-jsonrpc leaks those as unhandled rejections).
+    const input = new PassThrough();
+    input.pipe(child.stdin);
+    child.stdin.on("error", (error) =>
+      exit(`${options.command}: ${error.message}`),
+    );
+    const connection = createMessageConnection(
+      new StreamMessageReader(child.stdout),
+      new StreamMessageWriter(input),
+      {
+        error: (m) => run(Effect.logError(m)),
+        warn: (m) => run(Effect.logWarning(m)),
+        info: (m) => run(Effect.logInfo(m)),
+        log: (m) => run(Effect.logDebug(m)),
+      },
+    );
+    yield* Effect.addFinalizer(() => Effect.sync(() => connection.dispose()));
+    connection.onClose(() => exit(`${options.command} closed the connection`));
+    connection.onNotification((method, params) => {
+      PubSub.publishUnsafe(events, { method, params });
+    });
+    connection.onUnhandledProgress(({ token, value }) =>
+      run(
+        SubscriptionRef.update(progress, (active) =>
+          value.kind === "begin"
+            ? HashSet.add(active, token)
+            : value.kind === "end"
+              ? HashSet.remove(active, token)
+              : active,
+        ),
+      ),
+    );
+    connection.onRequest(
+      (method, params) =>
+        handlers.get(method)?.(params) ??
+        new ResponseError(ErrorCodes.MethodNotFound, `unhandled ${method}`),
+    );
+    connection.listen();
+
+    const send = <P, R>(type: RequestType<P, R, unknown>, params: P) =>
+      Effect.callback<R, LspError>((resume) => {
+        const cancellation = new CancellationTokenSource();
+        try {
+          connection
+            .sendRequest(type, params as never, cancellation.token)
+            .then(
+              (result) => resume(Effect.succeed(result)),
+              (error) => resume(Effect.fail(failure(type.method, error))),
+            );
+        } catch (error) {
+          resume(Effect.fail(failure(type.method, error)));
+        }
+        return Effect.ignore(Effect.try(() => cancellation.cancel()));
+      }).pipe(Effect.raceFirst(Deferred.await(exited)));
+
+    const notify = <P>(type: NotificationType<P>, params: P) =>
+      Effect.tryPromise({
+        try: () => connection.sendNotification(type, params as never),
+        catch: (error) => failure(type.method, error),
       });
 
-  const send = <P, R>(type: RequestType<P, R, unknown>, params: P) =>
-    Effect.callback<R, LspError>((resume) => {
-      const cancellation = new CancellationTokenSource();
-      try {
-        connection.sendRequest(type, params as never, cancellation.token).then(
-          (result) => resume(Effect.succeed(result)),
-          (error) => resume(Effect.fail(failure(type.method, error))),
-        );
-      } catch (error) {
-        resume(Effect.fail(failure(type.method, error)));
-      }
-      return Effect.ignore(Effect.try(() => cancellation.cancel()));
-    }).pipe(Effect.raceFirst(Deferred.await(exited)));
+    yield* SubscriptionRef.set(progress, HashSet.empty());
+    const initialized = yield* send(InitializeRequest.type, {
+      processId: process.pid,
+      clientInfo: { name: "lsp-mcp", version: "0.1.0" },
+      locale: "en",
+      rootPath: options.root,
+      rootUri,
+      workspaceFolders,
+      capabilities: clientCapabilities,
+      initializationOptions: options.initializationOptions as LSPAny,
+    });
+    yield* notify(InitializedNotification.type, {});
+    if (options.settings !== undefined) {
+      yield* notify(DidChangeConfigurationNotification.type, {
+        settings: options.settings as LSPAny,
+      });
+    }
+    yield* Effect.forEach(
+      documents.values(),
+      (textDocument) =>
+        notify(DidOpenTextDocumentNotification.type, { textDocument }),
+      { discard: true },
+    );
+    const shutdown = Effect.tryPromise(() =>
+      connection.sendRequest(ShutdownRequest.type),
+    ).pipe(
+      Effect.timeout("3 seconds"),
+      Effect.andThen(
+        Effect.tryPromise(() =>
+          connection.sendNotification(ExitNotification.type),
+        ),
+      ),
+      Effect.andThen(Deferred.await(exited).pipe(Effect.timeout("2 seconds"))),
+      Effect.ignore,
+    );
+    yield* Effect.addFinalizer(() =>
+      Effect.suspend(() =>
+        Deferred.isDoneUnsafe(exited) ? Effect.void : shutdown,
+      ),
+    );
+    return { initialized, exited, send, notify } satisfies Session;
+  });
+
+  /** Runs one session until its process exits, and fails with the reason. */
+  const serve = Effect.scoped(
+    Effect.gen(function* () {
+      const session = yield* start().pipe(
+        Effect.tapError((error) => Deferred.fail(initialized, error)),
+      );
+      yield* Deferred.succeed(current, session);
+      yield* Deferred.succeed(initialized, session.initialized);
+      return yield* Deferred.await(session.exited);
+    }),
+  );
+
+  const policy = restarts(limit).pipe(
+    // Only crashes are worth retrying; a server that fails to initialize is broken.
+    Schedule.while(({ input }) => input.code === ErrorCodes.ConnectionInactive),
+    Schedule.tap(({ input, output, duration }) =>
+      announce(
+        "warning",
+        `${input.message}; restarting in ${Duration.format(duration)}${
+          Number.isFinite(limit) ? ` (crash ${output} of ${limit})` : ""
+        }`,
+      ),
+    ),
+  );
+
+  const giveUp = (error: LspError) => {
+    const reason =
+      error.code !== ErrorCodes.ConnectionInactive
+        ? `restarting ${options.command} failed (${error.method}: ${error.message})`
+        : limit === 0
+          ? `${error.message}; restarting is disabled`
+          : `${error.message}; that is ${limit} crash${limit === 1 ? "" : "es"} in a row`;
+    const message = `${reason}. Restart lsp-mcp to recover`;
+    return Effect.andThen(
+      announce("error", message),
+      Deferred.fail(current, new LspError({ method: "connection", message })),
+    );
+  };
+
+  yield* serve.pipe(Effect.retryOrElse(policy, giveUp), Effect.forkScoped);
+  const first = yield* Deferred.await(initialized);
 
   const idle = SubscriptionRef.changes(progress).pipe(
     Stream.filter(HashSet.isEmpty),
@@ -226,8 +419,9 @@ const make = Effect.fn("LanguageServer.make")(function* (options: Options) {
   );
 
   const request = <P, R>(type: RequestType<P, R, unknown>, params: P) =>
-    idle.pipe(
-      Effect.andThen(send(type, params)),
+    session.pipe(
+      Effect.tap(() => idle),
+      Effect.flatMap((session) => session.send(type, params)),
       Effect.retry({
         while: (error) => error.retryable,
         schedule: Schedule.exponential("100 millis").pipe(
@@ -237,10 +431,11 @@ const make = Effect.fn("LanguageServer.make")(function* (options: Options) {
     );
 
   const notify = <P>(type: NotificationType<P>, params: P) =>
-    Effect.tryPromise({
-      try: () => connection.sendNotification(type, params as never),
-      catch: (error) => failure(type.method, error),
-    }).pipe(Effect.catch((error) => Effect.logWarning(error.message)));
+    Effect.sync(() => track(documents, type.method, params)).pipe(
+      Effect.andThen(session),
+      Effect.flatMap((session) => session.notify(type, params)),
+      Effect.catch((error) => Effect.logWarning(error.message)),
+    );
 
   const notifications = <P>(type: NotificationType<P>): Stream.Stream<P> =>
     Stream.fromPubSub(events).pipe(
@@ -254,54 +449,25 @@ const make = Effect.fn("LanguageServer.make")(function* (options: Options) {
   ) =>
     Effect.acquireRelease(
       Effect.sync(() =>
-        connection.onRequest(
+        handlers.set(
           type.method,
-          (params: P): HandlerResult<R, unknown> =>
+          (params) =>
             runPromise(
-              handler(params).pipe(
+              handler(params as P).pipe(
                 Effect.mapError((error) =>
                   error instanceof ResponseError
                     ? error
                     : new ResponseError(
-                      ErrorCodes.InternalError,
-                      error instanceof Error ? error.message : String(error),
-                    ),
+                        ErrorCodes.InternalError,
+                        error instanceof Error ? error.message : String(error),
+                      ),
                 ),
               ),
             ) as Promise<never>,
         ),
       ),
-      (disposable) => Effect.sync(() => disposable.dispose()),
+      () => Effect.sync(() => handlers.delete(type.method)),
     ).pipe(Effect.asVoid);
-
-  const initialized = yield* send(InitializeRequest.type, {
-    processId: process.pid,
-    clientInfo: { name: "lsp-mcp", version: "0.1.0" },
-    locale: "en",
-    rootPath: options.root,
-    rootUri,
-    workspaceFolders,
-    capabilities: clientCapabilities,
-    initializationOptions: options.initializationOptions as LSPAny,
-  });
-  yield* notify(InitializedNotification.type, {});
-  if (options.settings !== undefined) {
-    yield* notify(DidChangeConfigurationNotification.type, {
-      settings: options.settings as LSPAny,
-    });
-  }
-  yield* Effect.addFinalizer(() =>
-    Effect.tryPromise(() => connection.sendRequest(ShutdownRequest.type)).pipe(
-      Effect.timeout("3 seconds"),
-      Effect.andThen(
-        Effect.tryPromise(() =>
-          connection.sendNotification(ExitNotification.type),
-        ),
-      ),
-      Effect.andThen(Deferred.await(exited).pipe(Effect.timeout("2 seconds"))),
-      Effect.ignore,
-    ),
-  );
 
   const logs = Stream.merge(
     notifications(LogMessageNotification.type),
@@ -313,12 +479,13 @@ const make = Effect.fn("LanguageServer.make")(function* (options: Options) {
         message,
       }),
     ),
+    Stream.merge(Stream.fromPubSub(lifecycle)),
   );
 
   return LanguageServer.of({
     root: options.root,
-    capabilities: initialized.capabilities,
-    serverInfo: initialized.serverInfo,
+    capabilities: first.capabilities,
+    serverInfo: first.serverInfo,
     request,
     notify,
     notifications,
@@ -326,6 +493,61 @@ const make = Effect.fn("LanguageServer.make")(function* (options: Options) {
     logs,
   });
 });
+
+/** A crash this long after the previous one starts a fresh streak. */
+const quiet = Duration.minutes(1);
+
+/**
+ * Restart delays: exponential from 500ms, capped at 30s, giving up once
+ * `limit` crashes happened in a row. The output is the length of the streak.
+ */
+const restarts = (limit: number) =>
+  Schedule.fromStepWithMetadata(
+    Effect.sync(() => {
+      let streak = 0;
+      return ({ elapsedSincePrevious }: Schedule.InputMetadata<LspError>) => {
+        streak =
+          elapsedSincePrevious > Duration.toMillis(quiet) ? 1 : streak + 1;
+        return streak > limit
+          ? Cause.done(streak)
+          : Effect.succeed<[number, Duration.Duration]>([
+              streak,
+              Duration.millis(Math.min(500 * 2 ** (streak - 1), 30_000)),
+            ]);
+      };
+    }),
+  );
+
+/** Keep the open-document bookkeeping in step with what we tell the server. */
+const track = (
+  documents: Map<string, TextDocumentItem>,
+  method: string,
+  params: unknown,
+) => {
+  switch (method) {
+    case DidOpenTextDocumentNotification.method: {
+      const { textDocument } = params as DidOpenTextDocumentParams;
+      documents.set(textDocument.uri, textDocument);
+      break;
+    }
+    case DidChangeTextDocumentNotification.method: {
+      const { textDocument, contentChanges } =
+        params as DidChangeTextDocumentParams;
+      const open = documents.get(textDocument.uri);
+      const last = contentChanges.at(-1);
+      if (open && last && !("range" in last)) {
+        documents.set(textDocument.uri, {
+          ...open,
+          version: textDocument.version,
+          text: last.text,
+        });
+      }
+      break;
+    }
+    case DidCloseTextDocumentNotification.method:
+      documents.delete((params as DidCloseTextDocumentParams).textDocument.uri);
+  }
+};
 
 const logLevels: Record<MessageType, LogLevel> = {
   1: "error",
@@ -340,11 +562,11 @@ const section = (settings: unknown, path: string | undefined): LSPAny =>
   (path === undefined
     ? settings
     : path
-      .split(".")
-      .reduce<unknown>(
-        (value, key) => (value as Record<string, unknown> | null)?.[key],
-        settings,
-      )) as LSPAny;
+        .split(".")
+        .reduce<unknown>(
+          (value, key) => (value as Record<string, unknown> | null)?.[key],
+          settings,
+        )) as LSPAny;
 
 /**
  * What we tell the server we can do. Deliberately narrow: no dynamic
@@ -395,7 +617,10 @@ const clientCapabilities: ClientCapabilities = {
         deprecatedSupport: true,
       },
       completionItemKind: {
-        valueSet: Array.from({ length: 25 }, (_, i) => (i + 1) as CompletionItemKind),
+        valueSet: Array.from(
+          { length: 25 },
+          (_, i) => (i + 1) as CompletionItemKind,
+        ),
       },
       contextSupport: true,
     },

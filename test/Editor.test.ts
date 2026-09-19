@@ -1,7 +1,7 @@
 import { NodeServices } from "@effect/platform-node";
 import { assert, describe, it } from "@effect/vitest";
 import { Effect, FileSystem, Layer } from "effect";
-import { RequestType } from "vscode-languageserver-protocol";
+import { NotificationType, RequestType } from "vscode-languageserver-protocol";
 import { Diagnostics } from "../src/lsp/Diagnostics.ts";
 import { Documents } from "../src/lsp/Documents.ts";
 import * as Editor from "../src/lsp/Editor.ts";
@@ -12,6 +12,7 @@ const State = new RequestType<null, { open: number; closes: number }, void>(
   "fixture/state",
 );
 const Progress = new RequestType<number, string, void>("fixture/progress");
+const Crash = new NotificationType<null>("fixture/crash");
 
 const TestLayer = Layer.mergeAll(
   Documents.layer({ capacity: 2, languages: {} }),
@@ -168,4 +169,39 @@ describe("Editor", () => {
       );
     },
   );
+
+  it.layer(
+    Layer.mergeAll(
+      Documents.layer({ capacity: 2, languages: {} }),
+      Diagnostics.layer,
+    ).pipe(
+      Layer.provideMerge(
+        workspace({ "a.ts": "const alpha = 1\n" }, { restart: 1 }),
+      ),
+      Layer.provideMerge(NodeServices.layer),
+    ),
+    { excludeTestServices: true },
+  )("when the server crashes", (it) => {
+    it.effect(
+      "starts it again with the same documents open, until the policy gives up",
+      () =>
+        Effect.gen(function* () {
+          const lsp = yield* LanguageServer;
+          const hover = Editor.hover({
+            file: "a.ts",
+            line: 1,
+            symbol: "alpha",
+          });
+          yield* hover;
+
+          yield* lsp.notify(Crash, null);
+          assert.strictEqual((yield* hover)?.contents, "word **alpha**");
+          assert.strictEqual((yield* lsp.request(State, null)).open, 1);
+
+          yield* lsp.notify(Crash, null);
+          const error = yield* Effect.flip(hover);
+          assert.match(error.message, /1 crash in a row/);
+        }),
+    );
+  });
 });

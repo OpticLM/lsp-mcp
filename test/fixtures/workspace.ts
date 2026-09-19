@@ -1,11 +1,14 @@
 import { fileURLToPath } from "node:url";
 import { Effect, FileSystem, Layer, Path } from "effect";
-import { LanguageServer } from "../../src/lsp/LanguageServer.ts";
+import { LanguageServer, type Options } from "../../src/lsp/LanguageServer.ts";
 
 const server = fileURLToPath(new URL("./server.ts", import.meta.url));
 
 /** A temporary workspace with the given files, served by the fixture language server. */
-export const workspace = (files: Record<string, string>) =>
+export const workspace = (
+  files: Record<string, string>,
+  options?: Pick<Options, "restart">,
+) =>
   Layer.unwrap(
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
@@ -18,6 +21,7 @@ export const workspace = (files: Record<string, string>) =>
         command: process.execPath,
         args: [server],
         root,
+        ...options,
       });
     }),
   );

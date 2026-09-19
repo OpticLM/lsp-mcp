@@ -24,7 +24,8 @@ src/Resources.ts      MCP resources (lsp://server, lsp://diagnostics[/{file}]) a
 src/Server.ts         layer composition: LanguageServer → Documents+Diagnostics → transport → tools/resources
 src/main.ts           CLI entry (Command/Flag/Argument), logs to stderr, NodeRuntime.runMain
 src/lsp/              the ONLY place vscode-* packages are used at runtime
-  LanguageServer.ts   spawn + JSON-RPC + initialize/shutdown; request() waits for $/progress idle and retries ContentModified
+  LanguageServer.ts   spawn + JSON-RPC + initialize/shutdown, supervised: restarts on crash per policy, reopens documents
+                      request() waits for $/progress idle and retries ContentModified / a server that is being restarted
   Documents.ts        on-demand didOpen, LRU via ScopedCache, disk change detection → didChange+didSave, applyEdit
   Diagnostics.ts      publishDiagnostics accumulation; pull (textDocument/diagnostic) or settled push per doc version
   Editor.ts           the operations = MCP tool handlers; LSP results → Model values
@@ -48,6 +49,12 @@ Rule: outside `src/lsp/`, `vscode-*` may only be imported as types.
   plus a 250ms quiet period, bounded by 5s, memoized per (uri, version).
 - Tests that talk to the fixture server use `it.layer(..., { excludeTestServices: true })` so the real
   clock is used (Stream.debounce / timeouts would hang under TestClock).
+- Crashes: `--restart never|always|N` (default 3). A crash is the process exiting or closing the connection after a
+  successful initialize; a server that cannot initialize fails lsp-mcp immediately. Restarts back off from 500ms to 30s,
+  a crash more than a minute after the previous one starts a new streak, and the streak limit `N` ends restarting for good.
+  Requests in flight during a crash wait for the new process and retry; documents are re-`didOpen`ed with their current
+  text; the capabilities and tool set stay those of the first process. Each restart and the final give-up are logged and
+  sent to the MCP client as `notifications/message`. Once given up, every tool call fails with an `LspError` that says so.
 
 ## Status
 
@@ -55,5 +62,4 @@ Complete for the first release: 13 tools, 2 resources + 1 template, stdio and HT
 verified against the fixture server and `typescript-language-server`.
 
 Ideas not done: inlay hints, type hierarchy, semantic tokens, partial results, workspace/didChangeWatchedFiles
-when a server insists on it, restarting a crashed language server (currently requests fail with a clear
-`LspError` until the MCP client restarts the process).
+when a server insists on it.

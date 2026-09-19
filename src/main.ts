@@ -10,6 +10,14 @@ import { Argument, Command, Flag } from "effect/unstable/cli";
 import * as Server from "./Server.ts";
 
 const Json = Flag.withSchema(Schema.fromJsonString(Schema.Json));
+const crashes = { message: "expected a whole number of crashes" };
+const Restart = Schema.Union([
+  Schema.Literals(["never", "always"]),
+  Schema.NumberFromString.check(
+    Schema.isInt(crashes),
+    Schema.isGreaterThanOrEqualTo(0, crashes),
+  ),
+]);
 
 const command = Command.make(
   "lsp-mcp",
@@ -58,6 +66,14 @@ const command = Command.make(
       ),
       Flag.withDefault(32),
     ),
+    restart: Flag.String("restart").pipe(
+      Flag.withSchema(Restart),
+      Flag.withMetavar("never|always|N"),
+      Flag.withDescription(
+        "When the language server crashes: never start it again, always start it again, or give up after N crashes in a row (default 3)",
+      ),
+      Flag.withDefault(3),
+    ),
     command: Argument.String("server").pipe(
       Argument.withDescription("Language server executable"),
     ),
@@ -75,6 +91,7 @@ const command = Command.make(
     settings,
     languages,
     capacity,
+    restart,
     command,
     args,
   }) {
@@ -89,6 +106,7 @@ const command = Command.make(
           root: path.resolve(root),
           initializationOptions: Option.getOrUndefined(initOptions),
           settings: Option.getOrUndefined(settings),
+          restart,
         },
         documents: { capacity, languages },
       }),
@@ -110,6 +128,10 @@ const command = Command.make(
     {
       command: `lsp-mcp --settings '{"gopls":{"staticcheck":true}}' -- gopls`,
       description: "Go with workspace settings",
+    },
+    {
+      command: "lsp-mcp --restart always -- clangd",
+      description: "Keep bringing the server back, however often it crashes",
     },
   ]),
 );
